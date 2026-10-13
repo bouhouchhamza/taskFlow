@@ -85,9 +85,11 @@ Edit `.env.local`:
 ```env
 VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_YOUR_PUBLIC_KEY
+VITE_AUTH_REDIRECT_URL=
 ```
 
 Find these values in **Supabase → Connect** or **Project Settings → API Keys**.
+For local development, leave `VITE_AUTH_REDIRECT_URL` empty or omit it; the app will use the current origin, such as `http://localhost:5173`. In Vercel production, set it explicitly to `https://www.tasksflow.space`.
 
 > [!IMPORTANT]
 > Use the **publishable** key only. **Never** put a Supabase secret or `service_role` key in frontend environment variables. Vite exposes `VITE_` variables to the browser. Keep `.env.local` out of Git.
@@ -158,13 +160,80 @@ The old storage entry is deleted **only after a successful insert**. Imports may
 | Output directory | `dist` |
 | Root directory | `./` |
 
-4. Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in **Vercel → Project Settings → Environment Variables**.
+4. Add `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`, and `VITE_AUTH_REDIRECT_URL=https://www.tasksflow.space` in **Vercel → Project Settings → Environment Variables**.
 5. Deploy (or redeploy after adding variables).
-6. In **Supabase → Authentication → URL Configuration**, set **Site URL** to your production Vercel URL and add `https://your-app.vercel.app/**` (replace with your real domain) to **Redirect URLs**. Keep `http://localhost:5173/**` for local development.
+6. In **Supabase → Authentication → URL Configuration**, set **Site URL** to `https://www.tasksflow.space`. Add `https://www.tasksflow.space/**` to **Redirect URLs**. Keep `http://localhost:5173/**` for local development, and add your Vercel preview URL pattern only if you test Auth on preview deployments.
 7. Test **register → confirmation email (if required) → login → CRUD → refresh → logout** on the deployed site.
 
 > [!TIP]
 > An update to Vercel environment variables generally requires a new deployment for the Vite build to pick up the new values.
+
+## 📧 Production Auth email
+
+Supabase's built-in email sender is for development and demos. It has strict email limits and is not reliable for real production signups. A React change cannot raise that project email quota; production delivery requires Custom SMTP or a Supabase Send Email hook.
+
+Recommended provider: **Resend** for a developer-friendly setup, or **Brevo** if you prefer a larger transactional email suite.
+
+### Supabase URL configuration
+
+In **Supabase Dashboard → Authentication → URL Configuration**:
+
+| Setting | Production value |
+| :--- | :--- |
+| Site URL | `https://www.tasksflow.space` |
+| Redirect URL | `https://www.tasksflow.space/**` |
+| Local Redirect URL | `http://localhost:5173/**` |
+
+The signup code sends `emailRedirectTo` from `VITE_AUTH_REDIRECT_URL` in production and falls back to the current localhost origin during development. Do not set localhost as the production redirect.
+
+### Custom SMTP settings
+
+In **Supabase Dashboard → Authentication → Emails → SMTP Settings**:
+
+| Field | Resend | Brevo |
+| :--- | :--- | :--- |
+| Host | `smtp.resend.com` | `smtp-relay.brevo.com` |
+| Port | `465` | `587` |
+| Username | `resend` | Your Brevo SMTP login |
+| Password | Resend API key (`re_...`) | Brevo SMTP key, not the API key |
+| Sender address | `no-reply@tasksflow.space` or another verified sender | `no-reply@tasksflow.space` or another verified sender |
+| Sender name | `TaskFlow` | `TaskFlow` |
+
+Keep SMTP passwords only in the Supabase dashboard. Never put SMTP credentials in React, Vite variables, Git, or Vercel frontend environment variables.
+
+### DNS verification
+
+1. Add `tasksflow.space` or a sending subdomain such as `mail.tasksflow.space` in the SMTP provider.
+2. Copy the provider-generated DNS records into your DNS host.
+3. Verify SPF/return-path records so the provider is allowed to send for the domain.
+4. Verify DKIM records so outgoing Auth emails are cryptographically signed.
+5. Add a DMARC TXT record, starting safely with a monitoring policy such as `v=DMARC1; p=none; rua=mailto:dmarc@tasksflow.space`, then tighten it later after delivery is stable.
+6. Wait for DNS propagation and click the provider's verify/authenticate button before testing production signup.
+
+### Rate limits
+
+After Custom SMTP is active, open **Supabase Dashboard → Authentication → Rate Limits**. Check the email-sending limit and raise it only to a value your SMTP provider plan can safely handle. Keep anti-abuse limits enabled; do not disable email confirmation to work around delivery problems.
+
+### Expected signup flow
+
+1. User opens `https://www.tasksflow.space`.
+2. User selects **Inscription**, enters email and password, and submits once.
+3. The app calls Supabase signup with `emailRedirectTo=https://www.tasksflow.space`.
+4. If email confirmation is required, the app shows a confirmation-email message and no session is created yet.
+5. User opens the email, clicks the confirmation link, returns to TaskFlow, then logs in if not already signed in.
+6. Authenticated user can create, edit, complete, delete, refresh, and log out while RLS keeps tasks private.
+
+### Production testing checklist
+
+Use two real inboxes, preferably from different providers.
+
+1. Register User A on production and confirm the email is delivered from the verified sender.
+2. Click User A's confirmation link and verify it returns to `https://www.tasksflow.space`, not localhost.
+3. Log in as User A, create a task, refresh, edit it, complete it, delete it, and log out.
+4. Register User B with a different email and repeat confirmation.
+5. Verify User B cannot see User A's tasks.
+6. Log back in as User A and verify User A cannot see User B's tasks.
+7. Review Supabase Auth logs and SMTP provider logs for bounced, throttled, or spam-folder deliveries.
 
 ## 🗂️ Project structure
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarDays, Check, CheckCheck, CircleCheck, ClipboardList,
   Clock3, Edit3, Flag, LayoutDashboard, ListTodo, Plus,
@@ -18,6 +18,74 @@ const todayISO = () => {
   const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return local.toISOString().slice(0, 10);
 };
+
+function normalizeRedirectUrl(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return window.location.origin;
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  return withProtocol.replace(/\/+$/, '');
+}
+
+function getAuthRedirectUrl() {
+  return normalizeRedirectUrl(import.meta.env.VITE_AUTH_REDIRECT_URL || window.location.origin);
+}
+
+function getAuthErrorMessage(error, mode) {
+  const code = String(error?.code || error?.error_code || '').toLowerCase();
+  const status = Number(error?.status || error?.statusCode || 0);
+  const message = String(error?.message || error?.error_description || '').toLowerCase();
+
+  if (status === 429 || code.includes('rate') || message.includes('rate limit') || message.includes('too many')) {
+    return "Trop de demandes d'email en peu de temps. Attends quelques minutes avant de réessayer. Si le problème revient en production, le SMTP personnalisé Supabase doit être configuré.";
+  }
+
+  if (code === 'email_not_confirmed' || message.includes('email not confirmed')) {
+    return "Ton compte n'est pas encore confirmé. Ouvre l'email de confirmation, puis réessaie de te connecter.";
+  }
+
+  if (code === 'email_address_not_authorized' || message.includes('email address not authorized')) {
+    return "L'envoi d'emails est limité par la configuration Supabase actuelle. Configure un SMTP personnalisé pour accepter de vrais utilisateurs en production.";
+  }
+
+  if (code.includes('user_already') || code.includes('email_exists') || message.includes('already registered')) {
+    return "Si cette adresse est déjà utilisée, connecte-toi ou vérifie l'email de confirmation reçu.";
+  }
+
+  if (message.includes('invalid login credentials') || code === 'invalid_credentials') {
+    return "Connexion impossible. Vérifie ton email et ton mot de passe, puis réessaie.";
+  }
+
+  if (message.includes('password') || code === 'weak_password') {
+    return 'Le mot de passe doit contenir au moins 6 caractères.';
+  }
+
+  return mode === 'register'
+    ? "Inscription impossible pour le moment. Réessaie dans quelques instants."
+    : "Connexion impossible pour le moment. Réessaie dans quelques instants.";
+}
+
+function getConfirmationMessage() {
+  return "Si l'adresse est acceptée, un email de confirmation vient d'être envoyé. Ouvre-le pour activer ton compte, puis reviens te connecter.";
+}
+
+function readAuthRedirectError() {
+  const searchParams = new URLSearchParams(window.location.search);
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const code = searchParams.get('error_code') || searchParams.get('error') || hashParams.get('error_code') || hashParams.get('error');
+  const description = searchParams.get('error_description') || hashParams.get('error_description');
+
+  if (!code && !description) return null;
+  return { code, message: description };
+}
+
+function clearAuthRedirectError() {
+  const nextUrl = new URL(window.location.href);
+  ['error', 'error_code', 'error_description'].forEach(param => {
+    nextUrl.searchParams.delete(param);
+  });
+  nextUrl.hash = '';
+  window.history.replaceState(null, '', `${nextUrl.pathname}${nextUrl.search}`);
+}
 
 function formatDueDate(value) {
   if (!value) return '';
@@ -335,35 +403,49 @@ function AuthScreen() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const submittingRef = useRef(false);
+
+  useEffect(() => {
+    const redirectError = readAuthRedirectError();
+    if (redirectError) {
+      setErrorMessage(getAuthErrorMessage(redirectError, 'login'));
+      clearAuthRedirectError();
+    }
+  }, []);
 
   async function submit(event) {
     event.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setBusy(true);
     setMessage('');
     setErrorMessage('');
+    const normalizedEmail = email.trim().toLowerCase();
     try {
       if (mode === 'register') {
         const { data, error } = await supabase.auth.signUp({
-          email: email.trim(),
+          email: normalizedEmail,
           password,
-          options: { emailRedirectTo: window.location.origin },
+          options: { emailRedirectTo: getAuthRedirectUrl() },
         });
         if (error) throw error;
         if (!data.session) {
-          setMessage('Compte demandé ! Vérifie ton email pour confirmer ton inscription (si la confirmation est activée).');
+          setMessage(getConfirmationMessage());
+          setPassword('');
         } else {
           setMessage('Compte créé. Connexion en cours...');
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
+          email: normalizedEmail,
           password,
         });
         if (error) throw error;
       }
     } catch (error) {
-      setErrorMessage(error.message || 'Authentification impossible.');
+      setErrorMessage(getAuthErrorMessage(error, mode));
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   }
@@ -381,10 +463,10 @@ function AuthScreen() {
         <div className="auth-lock"><LockKeyhole size={23}/></div>
         <h1>{mode === 'login' ? 'Bon retour !' : 'Créer ton espace'}</h1>
         <p className="auth-description">{mode === 'login' ? 'Connecte-toi pour retrouver tes tâches sur tous tes appareils.' : 'Tes tâches restent privées et synchronisées.'}</p>
-        <div className="auth-tabs"><button className={mode === 'login' ? 'selected' : ''} type="button" onClick={() => changeMode('login')}>Connexion</button><button className={mode === 'register' ? 'selected' : ''} type="button" onClick={() => changeMode('register')}>Inscription</button></div>
+        <div className="auth-tabs"><button className={mode === 'login' ? 'selected' : ''} type="button" disabled={busy} onClick={() => changeMode('login')}>Connexion</button><button className={mode === 'register' ? 'selected' : ''} type="button" disabled={busy} onClick={() => changeMode('register')}>Inscription</button></div>
         <form className="auth-form" onSubmit={submit}>
-          <label>Email<input type="email" autoComplete="email" required placeholder="toi@exemple.com" value={email} onChange={event => setEmail(event.target.value)} /></label>
-          <label>Mot de passe<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required minLength={6} placeholder="6 caractères minimum" value={password} onChange={event => setPassword(event.target.value)} /></label>
+          <label>Email<input type="email" autoComplete="email" required disabled={busy} placeholder="toi@exemple.com" value={email} onChange={event => setEmail(event.target.value)} /></label>
+          <label>Mot de passe<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required minLength={6} disabled={busy} placeholder="6 caractères minimum" value={password} onChange={event => setPassword(event.target.value)} /></label>
           {errorMessage && <p role="alert" className="auth-error">{errorMessage}</p>}
           {message && <p role="status" className="auth-success">{message}</p>}
           <button type="submit" className="auth-submit" disabled={busy}>{busy ? 'Un instant...' : mode === 'login' ? 'Se connecter' : "Créer mon compte"}</button>
